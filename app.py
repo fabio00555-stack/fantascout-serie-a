@@ -1,176 +1,160 @@
-import re, time
+import streamlit as st
 import pandas as pd
 import requests
-import streamlit as st
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from io import StringIO
+import re
 
 st.set_page_config(page_title="FantaScout 26/27", page_icon="⚽", layout="centered")
 
 st.markdown("""
 <style>
-.block-container{padding:.8rem .7rem 4rem;max-width:900px}
-h1{font-size:1.75rem!important}
-.player{padding:.75rem;border:1px solid rgba(128,128,128,.25);border-radius:14px;margin:.55rem 0}
-.small{opacity:.7;font-size:.8rem}
+.block-container {padding:1rem .75rem 4rem;max-width:920px}
+h1 {font-size:1.75rem!important}
+.card {padding:.85rem;border:1px solid rgba(128,128,128,.25);border-radius:14px;margin-bottom:.7rem}
 </style>
 """, unsafe_allow_html=True)
 
-BASE="https://www.fantacalcio.it"
-HEAD={"User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"}
-SEASONS=["2025-26","2024-25","2023-24"]
-
-@st.cache_data(ttl=12*3600)
-def get(url):
-    r=requests.get(url,headers=HEAD,timeout=30)
-    r.raise_for_status()
-    return r.text
-
-def num(x):
-    if pd.isna(x): return None
-    m=re.search(r"-?\d+(?:[.,]\d+)?",str(x))
-    return float(m.group().replace(",",".")) if m else None
-
-def clean_name(x):
-    return re.sub(r"\s+"," ",str(x)).strip()
-
-@st.cache_data(ttl=12*3600)
-def season_table(season):
-    urls=[
-        f"{BASE}/statistiche-serie-a/{season}/italia/riepilogo",
-        f"{BASE}/statistiche-serie-a/{season}/italia",
-        f"{BASE}/statistiche-serie-a/{season}",
-    ]
-    html=None
-    for u in urls:
-        try:
-            html=get(u); break
-        except Exception: pass
-    if not html: raise RuntimeError(f"Statistiche {season} non raggiungibili")
-    tables=pd.read_html(html)
-    candidates=[]
-    for t in tables:
-        cols=[str(c).strip() for c in t.columns]
-        if "MV" in cols and "FM" in cols and "PV" in cols:
-            t=t.copy(); t.columns=cols
-            candidates.append(t)
-    if not candidates: raise RuntimeError(f"Tabella statistiche {season} non trovata")
-    df=candidates[0]
-    # normalizza nomi
-    name_col=next((c for c in df.columns if "Calciatore" in c), df.columns[0])
-    df=df.rename(columns={name_col:"giocatore"})
-    for c in ["PV","MV","FM","Gf","Ass","RP"]:
-        if c not in df.columns: df[c]=0
-    for c in ["PV","MV","FM","Gf","Ass","RP"]:
-        df[c]=df[c].map(num)
-    df["giocatore"]=df["giocatore"].map(clean_name)
-    df["bonus_gara"]=((df["Gf"].fillna(0)*3)+(df["Ass"].fillna(0))+(df["RP"].fillna(0)*3))/df["PV"].replace(0,pd.NA)
-    return df[["giocatore","PV","MV","FM","Gf","Ass","RP","bonus_gara"]].dropna(subset=["giocatore"])
-
-@st.cache_data(ttl=12*3600)
-def current_list():
-    urls=[
-        f"{BASE}/quotazioni-fantacalcio/2026-27",
-        f"{BASE}/quotazioni-fantacalcio",
-    ]
-    html=None
-    for u in urls:
-        try: html=get(u); break
-        except Exception: pass
-    if not html: raise RuntimeError("Listone 2026/27 non raggiungibile")
-    tables=pd.read_html(html)
-    for t in tables:
-        t=t.copy(); t.columns=[str(c).strip() for c in t.columns]
-        cols=" ".join(t.columns).lower()
-        if any(x in cols for x in ["fvm","quot","calciatore","ruolo"]):
-            # best effort: map likely columns
-            name=next((c for c in t.columns if c.lower() in ["calciatore","nome","giocatore"]),None)
-            role=next((c for c in t.columns if c.lower() in ["r","ruolo","role"]),None)
-            team=next((c for c in t.columns if c.lower() in ["squadra","sq","team"]),None)
-            if name:
-                out=pd.DataFrame({"giocatore":t[name].map(clean_name)})
-                out["ruolo"]=t[role].astype(str) if role else "?"
-                out["squadra"]=t[team].astype(str) if team else "?"
-                for src,dst in [("FVM","fvm"),("Quotazione","quotazione"),("Q","quotazione")]:
-                    c=next((x for x in t.columns if x.lower()==src.lower()),None)
-                    if c: out[dst]=t[c].map(num)
-                return out.drop_duplicates("giocatore")
-    raise RuntimeError("Formato listone non riconosciuto")
-
-def score(df):
-    # 55% FM, 30% MV, 15% bonus medio. Minimo 10 PV totali per evitare micro-campioni.
-    p=df["PV"].sum()
-    if p<=0: return None
-    fm=(df["FM"]*df["PV"]).sum()/p
-    mv=(df["MV"]*df["PV"]).sum()/p
-    bm=(df["bonus_gara"].fillna(0)*df["PV"]).sum()/p
-    return .55*fm+.30*mv+.15*bm
-
 st.title("⚽ FantaScout 26/27")
-st.caption("Database dinamico • Fantacalcio® storico 3 stagioni")
+st.caption("Database storico • versione mobile")
 
-if st.button("🔄 Aggiorna database"):
-    st.cache_data.clear(); st.rerun()
+SEASONS = {
+    "2025/26":"https://www.fantacalcio.it/statistiche-serie-a/2025-26/statistico/riepilogo",
+    "2024/25":"https://www.fantacalcio.it/statistiche-serie-a/2024-25/statistico/riepilogo",
+    "2023/24":"https://www.fantacalcio.it/statistiche-serie-a/2023-24/statistico/riepilogo",
+}
+HEADERS={"User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"}
 
-try:
-    current=current_list()
-    stats={s:season_table(s) for s in SEASONS}
-except Exception as e:
-    st.error("Non riesco a recuperare il database automatico.")
-    st.code(str(e))
-    st.stop()
+def clean(v):
+    return re.sub(r"\s+"," ",str(v)).strip() if pd.notna(v) else ""
 
-# join names; use current list as universe
-result=current.copy()
-for s in SEASONS:
-    x=stats[s].copy()
-    x=x.rename(columns={c:f"{c}_{s}" for c in x.columns if c!="giocatore"})
-    result=result.merge(x,on="giocatore",how="left")
+def num(v):
+    if pd.isna(v): return None
+    s=str(v).strip().replace(",",".")
+    s=re.sub(r"[^0-9.\-]","",s)
+    try: return float(s)
+    except: return None
 
-result["pv_3anni"]=result[[f"PV_{s}" for s in SEASONS]].fillna(0).sum(axis=1)
+def col(df, names):
+    for n in names:
+        for c in df.columns:
+            if c == n.lower() or n.lower() in c:
+                return c
+    return None
 
-def row_score(r):
-    d=[]
-    for s in SEASONS:
-        if pd.notna(r.get(f"PV_{s}")):
-            d.append(pd.Series({
-                "PV":r[f"PV_{s}"],"FM":r[f"FM_{s}"],"MV":r[f"MV_{s}"],
-                "bonus_gara":r[f"bonus_gara_{s}"]
-            }))
-    return score(pd.DataFrame(d)) if d else None
-result["score"]=result.apply(row_score,axis=1)
-result["nuovo_arrivo"]=result["pv_3anni"].eq(0)
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_tables(url):
+    r=requests.get(url,headers=HEADERS,timeout=(10,25))
+    r.raise_for_status()
+    return pd.read_html(StringIO(r.text))
 
-role_opts=["Tutti"]+[x for x in ["P","D","C","A"] if x in result["ruolo"].astype(str).unique()]
-role=st.segmented_control("Ruolo",role_opts,default="Tutti")
-if role and role!="Tutti": result=result[result["ruolo"].astype(str)==role]
+def parse(season,url):
+    tables=get_tables(url)
+    best=None; score=-1
+    for t in tables:
+        if t.empty: continue
+        t=t.copy()
+        t.columns=[re.sub(r"\s+"," ",str(c)).strip().lower() for c in t.columns]
+        s=0
+        if col(t,["nome","giocatore","player"]): s+=5
+        if col(t,["mv","media voto"]): s+=3
+        if col(t,["fm","fantamedia"]): s+=3
+        if col(t,["pv","presenze","partite"]): s+=2
+        if len(t)>=10: s+=2
+        if s>score: best,score=t,s
+    if best is None or score<4:
+        raise RuntimeError(f"Tabella statistiche non riconosciuta per {season}.")
+    nc=col(best,["nome","giocatore","player"])
+    rc=col(best,["ruolo","role"])
+    tc=col(best,["squadra","team","club"])
+    mvc=col(best,["mv","media voto","media"])
+    fmc=col(best,["fm","fantamedia"])
+    pvc=col(best,["pv","presenze","partite"])
+    gc=col(best,["gol","reti"])
+    ac=col(best,["assist"])
+    rows=[]
+    for _,r in best.iterrows():
+        name=clean(r.get(nc,""))
+        if not name or name.lower() in ("nome","giocatore","player"): continue
+        rows.append({
+            "giocatore":name,
+            "ruolo":clean(r.get(rc,"")) if rc else "",
+            "squadra":clean(r.get(tc,"")) if tc else "",
+            f"mv_{season}":num(r.get(mvc)) if mvc else None,
+            f"fm_{season}":num(r.get(fmc)) if fmc else None,
+            f"pv_{season}":num(r.get(pvc)) if pvc else None,
+            f"gol_{season}":num(r.get(gc)) if gc else None,
+            f"assist_{season}":num(r.get(ac)) if ac else None,
+        })
+    df=pd.DataFrame(rows)
+    if df.empty: raise RuntimeError(f"Nessun giocatore estratto per {season}.")
+    df["key"]=(df["giocatore"].str.lower()
+               .str.replace(r"[^a-zàèéìòù0-9 ]","",regex=True)
+               .str.replace(r"\s+"," ",regex=True).str.strip())
+    return df
 
-q=st.text_input("🔎 Cerca",placeholder="Nome giocatore")
-if q: result=result[result["giocatore"].str.contains(q,case=False,na=False)]
+@st.cache_data(ttl=21600, show_spinner=False)
+def build():
+    data={}; errors={}
+    for season,url in SEASONS.items():
+        try: data[season]=parse(season,url)
+        except Exception as e: errors[season]=str(e)
+    if not data:
+        raise RuntimeError("Nessuna stagione è stata recuperata. "+" | ".join(f"{s}: {e}" for s,e in errors.items()))
+    latest=data.get("2025/26",next(iter(data)))
+    db=data[latest].copy()
+    for season,d in data.items():
+        if season==latest: continue
+        add=d.drop(columns=["giocatore","ruolo","squadra"],errors="ignore")
+        db=db.merge(add,on="key",how="left")
+    fm=[c for c in db if c.startswith("fm_")]
+    mv=[c for c in db if c.startswith("mv_")]
+    db["fm_media_3anni"]=db[fm].apply(pd.to_numeric,errors="coerce").mean(axis=1) if fm else float("nan")
+    db["mv_media_3anni"]=db[mv].apply(pd.to_numeric,errors="coerce").mean(axis=1) if mv else float("nan")
+    db["score"]=db["fm_media_3anni"].fillna(0)*.7+db["mv_media_3anni"].fillna(0)*.3
+    return db,data,errors
 
-sort=st.selectbox("Ordina",["Indice FantaScout","FM 25/26","MV 25/26","Bonus/gara 25/26","PV 3 anni"])
-sortmap={"Indice FantaScout":"score","FM 25/26":"FM_2025-26","MV 25/26":"MV_2025-26","Bonus/gara 25/26":"bonus_gara_2025-26","PV 3 anni":"pv_3anni"}
-result=result.sort_values(sortmap[sort],ascending=False,na_position="last")
+with st.expander("⚙️ Stato database",expanded=True):
+    try:
+        with st.spinner("Recupero e preparo le tre stagioni…"):
+            db,data,errors=build()
+        st.success(f"Database pronto • {len(db)} giocatori • {len(data)} stagioni")
+        for s,e in errors.items(): st.warning(f"{s}: {e}")
+        if st.button("🔄 Aggiorna database"):
+            build.clear(); st.rerun()
+    except Exception as e:
+        st.error("Il database non è stato costruito.")
+        st.code(str(e))
+        st.stop()
 
-st.caption(f"{len(result)} giocatori • aggiornamento automatico")
+roles=["Tutti"]+[r for r in ["P","D","C","A"] if r in set(db["ruolo"].astype(str))]
+role=st.segmented_control("Ruolo",roles,default="Tutti")
+if role and role!="Tutti": db=db[db["ruolo"].astype(str)==role]
 
-for _,r in result.iterrows():
+q=st.text_input("🔎 Cerca giocatore",placeholder="Lautaro, Barella, Dimarco…")
+if q: db=db[db["giocatore"].str.contains(q,case=False,na=False)]
+
+sorts={"Indice FantaScout":"score","FM media 3 anni":"fm_media_3anni","MV media 3 anni":"mv_media_3anni","FM 2025/26":"fm_2025/26","MV 2025/26":"mv_2025/26"}
+sort_label=st.selectbox("Ordina per",[x for x,c in sorts.items() if c in db.columns])
+db=db.sort_values(sorts[sort_label],ascending=False,na_position="last")
+st.caption(f"{len(db)} giocatori")
+
+for _,p in db.iterrows():
+    score=p.get("score")
+    score=f"{float(score):.2f}" if pd.notna(score) else "—"
     with st.container():
-        st.markdown('<div class="player">',unsafe_allow_html=True)
-        sc="—" if pd.isna(r["score"]) else f"{r['score']:.2f}"
-        st.markdown(f"**{r['giocatore']}** · {r['ruolo']} · {r['squadra']} · **{sc}**")
-        c=st.columns(4)
-        for col,label,key in [(c[0],"FM","FM_2025-26"),(c[1],"MV","MV_2025-26"),(c[2],"Bonus/g","bonus_gara_2025-26"),(c[3],"PV 3a","pv_3anni")]:
-            v=r.get(key)
-            col.metric(label,"—" if pd.isna(v) else (f"{v:.2f}" if label!="PV 3a" else str(int(v))))
+        st.markdown('<div class="card">',unsafe_allow_html=True)
+        st.markdown(f"### {p.get('giocatore','—')}  
+`{p.get('ruolo','—')}` · **{p.get('squadra','—')}** · Indice **{score}**")
+        c1,c2,c3,c4=st.columns(4)
+        for c,label,key in [(c1,"FM 3a","fm_media_3anni"),(c2,"MV 3a","mv_media_3anni"),(c3,"FM 25/26","fm_2025/26"),(c4,"MV 25/26","mv_2025/26")]:
+            v=p.get(key)
+            c.metric(label,"—" if pd.isna(v) else f"{float(v):.2f}")
         with st.expander("📊 Storico"):
-            rows=[]
-            for s in SEASONS:
-                rows.append({"Stagione":s,"PV":r.get(f"PV_{s}"),"MV":r.get(f"MV_{s}"),"FM":r.get(f"FM_{s}"),"Bonus/gara":r.get(f"bonus_gara_{s}")})
-            st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
-        if bool(r["nuovo_arrivo"]):
-            st.info("🆕 Nessuna presenza a voto nelle tre stagioni di Serie A analizzate.")
+            hist=[]
+            for season in ["2025/26","2024/25","2023/24"]:
+                hist.append({"Stagione":season,"Club":p.get(f"squadra_{season}","—"),"FM":p.get(f"fm_{season}","—"),"MV":p.get(f"mv_{season}","—"),"Presenze":p.get(f"pv_{season}","—"),"Gol":p.get(f"gol_{season}","—"),"Assist":p.get(f"assist_{season}","—")})
+            st.dataframe(pd.DataFrame(hist),hide_index=True,use_container_width=True)
         st.markdown("</div>",unsafe_allow_html=True)
 
 st.divider()
-st.caption("Fonti statistiche: Fantacalcio® Serie A. Il bonus medio è calcolato da gol, assist e rigori parati per partita a voto. Le giornate di infortunio richiedono il dettaglio dei profili individuali e verranno aggiunte come modulo separato per evitare stime.")
+st.caption("FantaScout • dati recuperati online; verifica sempre le fonti prima dell'asta.")
